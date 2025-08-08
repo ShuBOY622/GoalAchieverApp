@@ -321,32 +321,4 @@ docker-compose exec user-service bash
 docker stats
 ```
 
-## 📚 Documentation
-
-- [Detailed Deployment Guide](DEPLOYMENT_GUIDE.md) - Complete deployment instructions
-- [API Documentation](docs/api.md) - REST API endpoints
-- [Architecture Guide](docs/architecture.md) - System design and patterns
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests
-5. Submit a pull request
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🆘 Support
-
-For issues and questions:
-- Create an issue in the repository
-- Check the troubleshooting section
-- Review the deployment guide
-- Contact the development team
-
----
-
 **Happy coding! 🚀**
