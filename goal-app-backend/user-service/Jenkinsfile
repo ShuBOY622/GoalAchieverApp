@@ -1,0 +1,203 @@
+pipeline {
+    agent any
+    
+    environment {
+        DOCKER_REGISTRY = 'your-ecr-registry-url'
+        AWS_REGION = 'us-east-1'
+        IMAGE_NAME = 'goalapp-user-service'
+        IMAGE_TAG = "${BUILD_NUMBER}"
+        AWS_ACCOUNT_ID = credentials('aws-account-id')
+        KUBECONFIG = credentials('kubeconfig')
+    }
+    
+    tools {
+        maven 'Maven-3.9.4'
+        jdk 'JDK-17'
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+                script {
+                    env.GIT_COMMIT_SHORT = sh(
+                        script: "git rev-parse --short HEAD",
+                        returnStdout: true
+                    ).trim()
+                }
+            }
+        }
+        
+        stage('Build and Test') {
+            steps {
+                dir('goal-app-backend') {
+                    sh '''
+                        # Build common module first
+                        mvn clean install -f common/pom.xml -DskipTests
+                        
+                        # Build and test user-service
+                        mvn clean compile test -f user-service/pom.xml
+                    '''
+                }
+            }
+            post {
+                always {
+                    publishTestResults testResultsPattern: '**/target/surefire-reports/*.xml'
+                    publishCoverage adapters: [jacocoAdapter('**/target/site/jacoco/jacoco.xml')]
+                }
+            }
+        }
+        
+        stage('Package') {
+            steps {
+                dir('goal-app-backend') {
+                    sh 'mvn clean package -f user-service/pom.xml -DskipTests'
+                }
+            }
+        }
+        
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    dir('goal-app-backend/user-service') {
+                        def image = docker.build("${IMAGE_NAME}:${IMAGE_TAG}")
+                        env.DOCKER_IMAGE = "${IMAGE_NAME}:${IMAGE_TAG}"
+                    }
+                }
+            }
+        }
+        
+        stage('Security Scan') {
+            parallel {
+                stage('Trivy Scan') {
+                    steps {
+                        sh """
+                            trivy image --format json --output trivy-report.json ${IMAGE_NAME}:${IMAGE_TAG}
+                        """
+                        publishHTML([
+                            allowMissing: false,
+                            alwaysLinkToLastBuild: true,
+                            keepAll: true,
+                            reportDir: '.',
+                            reportFiles: 'trivy-report.json',
+                            reportName: 'Trivy Security Report'
+                        ])
+                    }
+                }
+                stage('SonarQube Analysis') {
+                    steps {
+                        withSonarQubeEnv('SonarQube') {
+                            dir('goal-app-backend') {
+                                sh '''
+                                    mvn sonar:sonar -f user-service/pom.xml \
+                                        -Dsonar.projectKey=goalapp-user-service \
+                                        -Dsonar.projectName="Goal App User Service"
+                                '''
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Quality Gate') {
+            steps {
+                timeout(time: 5, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+        
+        stage('Push to ECR') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch 'develop'
+                }
+            }
+            steps {
+                script {
+                    sh """
+                        aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+                        
+                        docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${IMAGE_NAME}:${IMAGE_TAG}
+                        docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${IMAGE_NAME}:latest
+                        
+                        docker push ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${IMAGE_NAME}:${IMAGE_TAG}
+                        docker push ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${IMAGE_NAME}:latest
+                    """
+                }
+            }
+        }
+        
+        stage('Deploy to Development') {
+            when {
+                branch 'develop'
+            }
+            steps {
+                script {
+                    sh """
+                        helm upgrade --install user-service-dev ./helm/user-service \
+                            --namespace goalapp-dev \
+                            --set image.repository=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${IMAGE_NAME} \
+                            --set image.tag=${IMAGE_TAG} \
+                            --set environment=development \
+                            --wait --timeout=300s
+                    """
+                }
+            }
+        }
+        
+        stage('Deploy to Production') {
+            when {
+                branch 'main'
+            }
+            steps {
+                script {
+                    input message: 'Deploy to Production?', ok: 'Deploy'
+                    sh """
+                        helm upgrade --install user-service-prod ./helm/user-service \
+                            --namespace goalapp-prod \
+                            --set image.repository=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${IMAGE_NAME} \
+                            --set image.tag=${IMAGE_TAG} \
+                            --set environment=production \
+                            --wait --timeout=300s
+                    """
+                }
+            }
+        }
+        
+        stage('Health Check') {
+            steps {
+                script {
+                    def namespace = env.BRANCH_NAME == 'main' ? 'goalapp-prod' : 'goalapp-dev'
+                    sh """
+                        kubectl wait --for=condition=ready pod -l app=user-service -n ${namespace} --timeout=300s
+                        kubectl get pods -n ${namespace} -l app=user-service
+                    """
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            cleanWs()
+            sh 'docker system prune -f'
+        }
+        success {
+            slackSend(
+                channel: '#deployments',
+                color: 'good',
+                message: "✅ User Service deployment successful - Build: ${BUILD_NUMBER}, Branch: ${BRANCH_NAME}"
+            )
+        }
+        failure {
+            slackSend(
+                channel: '#deployments',
+                color: 'danger',
+                message: "❌ User Service deployment failed - Build: ${BUILD_NUMBER}, Branch: ${BRANCH_NAME}"
+            )
+        }
+    }
+}

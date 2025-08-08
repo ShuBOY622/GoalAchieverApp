@@ -1,0 +1,317 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Amazon MSK (Kafka) cluster for Goal App microservices'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, prod]
+    Description: Environment name
+  
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID where MSK cluster will be created
+  
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private subnet IDs for MSK cluster (minimum 2 AZs)
+  
+  KafkaVersion:
+    Type: String
+    Default: '2.8.1'
+    Description: Kafka version for MSK cluster
+  
+  InstanceType:
+    Type: String
+    Default: kafka.t3.small
+    AllowedValues: [kafka.t3.small, kafka.m5.large, kafka.m5.xlarge]
+    Description: MSK broker instance type
+
+Resources:
+  # Security Group for MSK
+  MSKSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${Environment}-goalapp-msk-sg'
+      GroupDescription: Security group for Goal App MSK cluster
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 9092
+          ToPort: 9092
+          SourceSecurityGroupId: !Ref EKSSecurityGroup
+          Description: Kafka plaintext access from EKS
+        - IpProtocol: tcp
+          FromPort: 9094
+          ToPort: 9094
+          SourceSecurityGroupId: !Ref EKSSecurityGroup
+          Description: Kafka TLS access from EKS
+        - IpProtocol: tcp
+          FromPort: 2181
+          ToPort: 2181
+          SourceSecurityGroupId: !Ref EKSSecurityGroup
+          Description: Zookeeper access from EKS
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-goalapp-msk-sg'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Security Group for EKS to access MSK
+  EKSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${Environment}-goalapp-eks-msk-sg'
+      GroupDescription: Security group for EKS cluster to access MSK
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-goalapp-eks-msk-sg'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # CloudWatch Log Group for MSK
+  MSKLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/msk/${Environment}-goalapp-cluster'
+      RetentionInDays: !If [IsProd, 30, 7]
+
+  # MSK Configuration
+  MSKConfiguration:
+    Type: AWS::MSK::Configuration
+    Properties:
+      Name: !Sub '${Environment}-goalapp-msk-config'
+      Description: Configuration for Goal App MSK cluster
+      KafkaVersionsList:
+        - !Ref KafkaVersion
+      ServerProperties: |
+        auto.create.topics.enable=true
+        default.replication.factor=3
+        min.insync.replicas=2
+        num.partitions=3
+        num.network.threads=8
+        num.io.threads=8
+        socket.send.buffer.bytes=102400
+        socket.receive.buffer.bytes=102400
+        socket.request.max.bytes=104857600
+        num.replica.fetchers=4
+        replica.lag.time.max.ms=30000
+        replica.socket.timeout.ms=30000
+        replica.socket.receive.buffer.bytes=65536
+        replica.fetch.max.bytes=1048576
+        replica.fetch.wait.max.ms=500
+        replica.high.watermark.checkpoint.interval.ms=5000
+        fetch.purgatory.purge.interval.requests=1000
+        producer.purgatory.purge.interval.requests=1000
+        zookeeper.session.timeout.ms=18000
+        zookeeper.connection.timeout.ms=18000
+        zookeeper.sync.time.ms=2000
+        controlled.shutdown.enable=true
+        controlled.shutdown.max.retries=3
+        controlled.shutdown.retry.backoff.ms=5000
+        log.roll.hours=168
+        log.retention.hours=168
+        log.retention.bytes=1073741824
+        log.segment.bytes=1073741824
+        log.retention.check.interval.ms=300000
+        log.segment.delete.delay.ms=60000
+        log.flush.interval.messages=9223372036854775807
+        log.flush.offset.checkpoint.interval.ms=60000
+        log.flush.scheduler.interval.ms=9223372036854775807
+        log.roll.jitter.hours=0
+        log.cleanup.policy=delete
+        compression.type=producer
+        message.max.bytes=1000000
+        replica.fetch.min.bytes=1
+        group.initial.rebalance.delay.ms=0
+        offsets.topic.replication.factor=3
+        transaction.state.log.replication.factor=3
+        transaction.state.log.min.isr=2
+
+  # MSK Cluster
+  MSKCluster:
+    Type: AWS::MSK::Cluster
+    Properties:
+      ClusterName: !Sub '${Environment}-goalapp-cluster'
+      KafkaVersion: !Ref KafkaVersion
+      NumberOfBrokerNodes: !If [IsProd, 6, 3]
+      BrokerNodeGroupInfo:
+        InstanceType: !Ref InstanceType
+        ClientSubnets: !Ref PrivateSubnetIds
+        SecurityGroups:
+          - !Ref MSKSecurityGroup
+        StorageInfo:
+          EBSStorageInfo:
+            VolumeSize: !If [IsProd, 100, 50]
+            ProvisionedThroughput:
+              Enabled: true
+              VolumeThroughput: !If [IsProd, 250, 125]
+      ConfigurationInfo:
+        Arn: !Ref MSKConfiguration
+        Revision: 1
+      EncryptionInfo:
+        EncryptionAtRest:
+          DataVolumeKMSKeyId: alias/aws/msk
+        EncryptionInTransit:
+          ClientBroker: TLS
+          InCluster: true
+      ClientAuthentication:
+        Sasl:
+          Scram:
+            Enabled: true
+        Tls:
+          Enabled: true
+      LoggingInfo:
+        BrokerLogs:
+          CloudWatchLogs:
+            Enabled: true
+            LogGroup: !Ref MSKLogGroup
+          Firehose:
+            Enabled: false
+          S3:
+            Enabled: false
+      EnhancedMonitoring: !If [IsProd, 'PER_TOPIC_PER_PARTITION', 'PER_TOPIC_PER_BROKER']
+      OpenMonitoring:
+        Prometheus:
+          JmxExporter:
+            EnabledInBroker: true
+          NodeExporter:
+            EnabledInBroker: true
+      Tags:
+        Environment: !Ref Environment
+        Project: goalapp
+        ManagedBy: CloudFormation
+
+  # MSK Connect Custom Plugin (for connectors if needed)
+  MSKConnectCustomPlugin:
+    Type: AWS::MSKConnect::CustomPlugin
+    Properties:
+      Name: !Sub '${Environment}-goalapp-connectors'
+      Description: Custom connectors for Goal App
+      ContentType: ZIP
+      Location:
+        S3Location:
+          BucketArn: !Sub 'arn:aws:s3:::${Environment}-goalapp-msk-connectors'
+          FileKey: connectors.zip
+
+  # IAM Role for MSK Connect
+  MSKConnectRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${Environment}-goalapp-msk-connect-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: kafkaconnect.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonMSKConnectServiceExecutionRole
+      Policies:
+        - PolicyName: MSKConnectPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kafka-cluster:Connect
+                  - kafka-cluster:AlterCluster
+                  - kafka-cluster:DescribeCluster
+                Resource: !GetAtt MSKCluster.Arn
+              - Effect: Allow
+                Action:
+                  - kafka-cluster:*Topic*
+                  - kafka-cluster:WriteData
+                  - kafka-cluster:ReadData
+                Resource: !Sub '${MSKCluster.Arn}/topic/*'
+              - Effect: Allow
+                Action:
+                  - kafka-cluster:AlterGroup
+                  - kafka-cluster:DescribeGroup
+                Resource: !Sub '${MSKCluster.Arn}/group/*'
+
+  # CloudWatch Alarms
+  MSKCPUUtilizationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-MSK-HighCPUUtilization'
+      AlarmDescription: MSK cluster high CPU utilization
+      MetricName: CpuUser
+      Namespace: AWS/Kafka
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: Cluster Name
+          Value: !Ref MSKCluster
+      AlarmActions:
+        - !Ref SNSTopic
+
+  MSKDiskSpaceAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-MSK-LowDiskSpace'
+      AlarmDescription: MSK cluster low disk space
+      MetricName: KafkaDataLogsDiskUsed
+      Namespace: AWS/Kafka
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 85
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: Cluster Name
+          Value: !Ref MSKCluster
+      AlarmActions:
+        - !Ref SNSTopic
+
+  # SNS Topic for Alarms
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${Environment}-goalapp-msk-alerts'
+      DisplayName: Goal App MSK Alerts
+
+Conditions:
+  IsProd: !Equals [!Ref Environment, prod]
+
+Outputs:
+  MSKClusterArn:
+    Description: MSK Cluster ARN
+    Value: !Ref MSKCluster
+    Export:
+      Name: !Sub '${Environment}-MSKCluster-Arn'
+
+  MSKBootstrapServers:
+    Description: MSK Bootstrap Servers
+    Value: !GetAtt MSKCluster.BootstrapBrokerString
+    Export:
+      Name: !Sub '${Environment}-MSKCluster-BootstrapServers'
+
+  MSKBootstrapServersTLS:
+    Description: MSK Bootstrap Servers (TLS)
+    Value: !GetAtt MSKCluster.BootstrapBrokerStringTls
+    Export:
+      Name: !Sub '${Environment}-MSKCluster-BootstrapServersTLS'
+
+  MSKZookeeperConnectString:
+    Description: MSK Zookeeper Connect String
+    Value: !GetAtt MSKCluster.ZookeeperConnectString
+    Export:
+      Name: !Sub '${Environment}-MSKCluster-ZookeeperConnect'
+
+  MSKSecurityGroupId:
+    Description: Security Group ID for MSK cluster
+    Value: !Ref MSKSecurityGroup
+    Export:
+      Name: !Sub '${Environment}-MSK-SecurityGroup-Id'
+
+  EKSSecurityGroupId:
+    Description: Security Group ID for EKS cluster to access MSK
+    Value: !Ref EKSSecurityGroup
+    Export:
+      Name: !Sub '${Environment}-EKS-MSK-SecurityGroup-Id'

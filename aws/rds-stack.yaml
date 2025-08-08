@@ -1,0 +1,353 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'RDS MySQL instances for Goal App microservices'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, prod]
+    Description: Environment name
+  
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID where RDS instances will be created
+  
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private subnet IDs for RDS instances
+  
+  DBInstanceClass:
+    Type: String
+    Default: db.t3.micro
+    AllowedValues: [db.t3.micro, db.t3.small, db.t3.medium, db.r5.large]
+    Description: RDS instance class
+  
+  MasterUsername:
+    Type: String
+    Default: goalapp
+    Description: Master username for RDS instances
+  
+  MasterPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    MaxLength: 128
+    Description: Master password for RDS instances
+
+Resources:
+  # DB Subnet Group
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: !Sub '${Environment}-goalapp-db-subnet-group'
+      DBSubnetGroupDescription: Subnet group for Goal App RDS instances
+      SubnetIds: !Ref PrivateSubnetIds
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-goalapp-db-subnet-group'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Security Group for RDS
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${Environment}-goalapp-db-sg'
+      GroupDescription: Security group for Goal App RDS instances
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref EKSSecurityGroup
+          Description: MySQL access from EKS cluster
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-goalapp-db-sg'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Security Group for EKS to access RDS
+  EKSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${Environment}-goalapp-eks-sg'
+      GroupDescription: Security group for EKS cluster to access RDS
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-goalapp-eks-sg'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Parameter Group
+  DBParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Family: mysql8.0
+      Description: Parameter group for Goal App MySQL instances
+      Parameters:
+        innodb_buffer_pool_size: '{DBInstanceClassMemory*3/4}'
+        max_connections: 1000
+        slow_query_log: 1
+        long_query_time: 2
+        general_log: 0
+        binlog_format: ROW
+        innodb_file_per_table: 1
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-goalapp-db-params'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # User Service Database
+  UserServiceDB:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub '${Environment}-goalapp-user-db'
+      DBName: goalapp_user
+      Engine: mysql
+      EngineVersion: '8.0.35'
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: 20
+      MaxAllocatedStorage: 100
+      StorageType: gp3
+      StorageEncrypted: true
+      MasterUsername: !Ref MasterUsername
+      MasterUserPassword: !Ref MasterPassword
+      VPCSecurityGroups:
+        - !Ref DBSecurityGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      DBParameterGroupName: !Ref DBParameterGroup
+      BackupRetentionPeriod: !If [IsProd, 7, 3]
+      PreferredBackupWindow: '03:00-04:00'
+      PreferredMaintenanceWindow: 'sun:04:00-sun:05:00'
+      MultiAZ: !If [IsProd, true, false]
+      PubliclyAccessible: false
+      DeletionProtection: !If [IsProd, true, false]
+      EnablePerformanceInsights: true
+      PerformanceInsightsRetentionPeriod: !If [IsProd, 731, 7]
+      MonitoringInterval: 60
+      MonitoringRoleArn: !GetAtt RDSEnhancedMonitoringRole.Arn
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-goalapp-user-db'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: user-service
+
+  # Goal Service Database
+  GoalServiceDB:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub '${Environment}-goalapp-goal-db'
+      DBName: goalapp_goal
+      Engine: mysql
+      EngineVersion: '8.0.35'
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: 20
+      MaxAllocatedStorage: 100
+      StorageType: gp3
+      StorageEncrypted: true
+      MasterUsername: !Ref MasterUsername
+      MasterUserPassword: !Ref MasterPassword
+      VPCSecurityGroups:
+        - !Ref DBSecurityGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      DBParameterGroupName: !Ref DBParameterGroup
+      BackupRetentionPeriod: !If [IsProd, 7, 3]
+      PreferredBackupWindow: '03:00-04:00'
+      PreferredMaintenanceWindow: 'sun:04:00-sun:05:00'
+      MultiAZ: !If [IsProd, true, false]
+      PubliclyAccessible: false
+      DeletionProtection: !If [IsProd, true, false]
+      EnablePerformanceInsights: true
+      PerformanceInsightsRetentionPeriod: !If [IsProd, 731, 7]
+      MonitoringInterval: 60
+      MonitoringRoleArn: !GetAtt RDSEnhancedMonitoringRole.Arn
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-goalapp-goal-db'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: goal-service
+
+  # Points Service Database
+  PointsServiceDB:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub '${Environment}-goalapp-points-db'
+      DBName: goalapp_points
+      Engine: mysql
+      EngineVersion: '8.0.35'
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: 20
+      MaxAllocatedStorage: 100
+      StorageType: gp3
+      StorageEncrypted: true
+      MasterUsername: !Ref MasterUsername
+      MasterUserPassword: !Ref MasterPassword
+      VPCSecurityGroups:
+        - !Ref DBSecurityGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      DBParameterGroupName: !Ref DBParameterGroup
+      BackupRetentionPeriod: !If [IsProd, 7, 3]
+      PreferredBackupWindow: '03:00-04:00'
+      PreferredMaintenanceWindow: 'sun:04:00-sun:05:00'
+      MultiAZ: !If [IsProd, true, false]
+      PubliclyAccessible: false
+      DeletionProtection: !If [IsProd, true, false]
+      EnablePerformanceInsights: true
+      PerformanceInsightsRetentionPeriod: !If [IsProd, 731, 7]
+      MonitoringInterval: 60
+      MonitoringRoleArn: !GetAtt RDSEnhancedMonitoringRole.Arn
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-goalapp-points-db'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: points-service
+
+  # Notification Service Database
+  NotificationServiceDB:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub '${Environment}-goalapp-notification-db'
+      DBName: goalapp_notification
+      Engine: mysql
+      EngineVersion: '8.0.35'
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: 20
+      MaxAllocatedStorage: 100
+      StorageType: gp3
+      StorageEncrypted: true
+      MasterUsername: !Ref MasterUsername
+      MasterUserPassword: !Ref MasterPassword
+      VPCSecurityGroups:
+        - !Ref DBSecurityGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      DBParameterGroupName: !Ref DBParameterGroup
+      BackupRetentionPeriod: !If [IsProd, 7, 3]
+      PreferredBackupWindow: '03:00-04:00'
+      PreferredMaintenanceWindow: 'sun:04:00-sun:05:00'
+      MultiAZ: !If [IsProd, true, false]
+      PubliclyAccessible: false
+      DeletionProtection: !If [IsProd, true, false]
+      EnablePerformanceInsights: true
+      PerformanceInsightsRetentionPeriod: !If [IsProd, 731, 7]
+      MonitoringInterval: 60
+      MonitoringRoleArn: !GetAtt RDSEnhancedMonitoringRole.Arn
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-goalapp-notification-db'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: notification-service
+
+  # Challenge Service Database
+  ChallengeServiceDB:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub '${Environment}-goalapp-challenge-db'
+      DBName: challengedb
+      Engine: mysql
+      EngineVersion: '8.0.35'
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: 20
+      MaxAllocatedStorage: 100
+      StorageType: gp3
+      StorageEncrypted: true
+      MasterUsername: !Ref MasterUsername
+      MasterUserPassword: !Ref MasterPassword
+      VPCSecurityGroups:
+        - !Ref DBSecurityGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      DBParameterGroupName: !Ref DBParameterGroup
+      BackupRetentionPeriod: !If [IsProd, 7, 3]
+      PreferredBackupWindow: '03:00-04:00'
+      PreferredMaintenanceWindow: 'sun:04:00-sun:05:00'
+      MultiAZ: !If [IsProd, true, false]
+      PubliclyAccessible: false
+      DeletionProtection: !If [IsProd, true, false]
+      EnablePerformanceInsights: true
+      PerformanceInsightsRetentionPeriod: !If [IsProd, 731, 7]
+      MonitoringInterval: 60
+      MonitoringRoleArn: !GetAtt RDSEnhancedMonitoringRole.Arn
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-goalapp-challenge-db'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: challenge-service
+
+  # Enhanced Monitoring Role
+  RDSEnhancedMonitoringRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ''
+            Effect: Allow
+            Principal:
+              Service: monitoring.rds.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole'
+      Path: /
+
+Conditions:
+  IsProd: !Equals [!Ref Environment, prod]
+
+Outputs:
+  UserServiceDBEndpoint:
+    Description: User Service Database Endpoint
+    Value: !GetAtt UserServiceDB.Endpoint.Address
+    Export:
+      Name: !Sub '${Environment}-UserServiceDB-Endpoint'
+
+  GoalServiceDBEndpoint:
+    Description: Goal Service Database Endpoint
+    Value: !GetAtt GoalServiceDB.Endpoint.Address
+    Export:
+      Name: !Sub '${Environment}-GoalServiceDB-Endpoint'
+
+  PointsServiceDBEndpoint:
+    Description: Points Service Database Endpoint
+    Value: !GetAtt PointsServiceDB.Endpoint.Address
+    Export:
+      Name: !Sub '${Environment}-PointsServiceDB-Endpoint'
+
+  NotificationServiceDBEndpoint:
+    Description: Notification Service Database Endpoint
+    Value: !GetAtt NotificationServiceDB.Endpoint.Address
+    Export:
+      Name: !Sub '${Environment}-NotificationServiceDB-Endpoint'
+
+  ChallengeServiceDBEndpoint:
+    Description: Challenge Service Database Endpoint
+    Value: !GetAtt ChallengeServiceDB.Endpoint.Address
+    Export:
+      Name: !Sub '${Environment}-ChallengeServiceDB-Endpoint'
+
+  DBSecurityGroupId:
+    Description: Security Group ID for RDS instances
+    Value: !Ref DBSecurityGroup
+    Export:
+      Name: !Sub '${Environment}-DB-SecurityGroup-Id'
+
+  EKSSecurityGroupId:
+    Description: Security Group ID for EKS cluster
+    Value: !Ref EKSSecurityGroup
+    Export:
+      Name: !Sub '${Environment}-EKS-SecurityGroup-Id'

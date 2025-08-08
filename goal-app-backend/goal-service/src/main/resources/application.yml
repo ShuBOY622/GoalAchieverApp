@@ -1,0 +1,62 @@
+server:
+  port: 8082
+
+spring:
+  application:
+    name: goal-service
+
+  datasource:
+    url: jdbc:mysql://localhost:3306/goalapp_goal
+    username: D3_87069_Shubham
+    password: root
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.MySQL8Dialect
+
+  kafka:
+    bootstrap-servers: localhost:9092
+
+    # ✅ ADD: Consumer configuration (was missing)
+    consumer:
+      group-id: goal-service-group
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      key-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+      properties:
+        # ✅ Delegate to actual deserializers
+        spring.deserializer.key.delegate.class: org.apache.kafka.common.serialization.StringDeserializer
+        spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JsonDeserializer
+
+        # ✅ Configure JSON deserializer
+        spring.json.value.default.type: org.goalapp.common.dto.CreateSharedGoalEvent
+        spring.json.trusted.packages: "org.goalapp.common.dto,org.goalapp.goal.dto"
+        spring.json.use.type.headers: false
+
+    # ✅ Keep existing producer configuration
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+
+    listener:
+      concurrency: 1
+      ack-mode: manual_immediate
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+# ✅ ADD: Enhanced logging for debugging
+logging:
+  level:
+    org.goalapp.goal: DEBUG
+    org.springframework.kafka: INFO
+    org.apache.kafka: WARN

@@ -1,0 +1,136 @@
+# Server Configuration
+server:
+  port: 8085  # ✅ Matches API Gateway routing
+
+
+# Spring Configuration
+spring:
+  application:
+    name: challenge-service
+
+  # MySQL Database Configuration
+  datasource:
+    url: jdbc:mysql://localhost:3306/challengedb?createDatabaseIfNotExist=true&useSSL=false&serverTimezone=UTC
+    username: D3_87069_Shubham
+    password: root
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      connection-timeout: 20000
+      maximum-pool-size: 10
+      minimum-idle: 5
+      idle-timeout: 300000
+      max-lifetime: 1800000
+
+  # JPA/Hibernate Configuration for MySQL
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.MySQL8Dialect
+        format_sql: true
+        jdbc:
+          time_zone: UTC
+    database-platform: org.hibernate.dialect.MySQL8Dialect
+    database: mysql
+
+  # Kafka Configuration (unchanged)
+  kafka:
+    bootstrap-servers: localhost:9092
+
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+
+
+      acks: all
+      retries: 3
+      retry-backoff-ms: 1000
+      request-timeout-ms: 30000
+      delivery-timeout-ms: 120000
+      connections-max-idle-ms: 540000
+      reconnect-backoff-ms: 50
+      reconnect-backoff-max-ms: 1000
+      batch-size: 16384
+      linger-ms: 1
+      buffer-memory: 33554432
+      properties:
+        spring:
+          json:
+            add:
+              type:
+                headers: false
+
+    consumer:
+      group-id: challenge-service-group
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      auto-offset-reset: earliest
+
+
+      session-timeout-ms: 30000
+      heartbeat-interval-ms: 3000
+      max-poll-interval-ms: 300000
+      enable-auto-commit: false
+      properties:
+        spring:
+          json:
+            trusted:
+              packages: "org.goalapp.common.dto,org.goalapp.challenge.dto"
+
+    listener:
+      ack-mode: manual_immediate
+      concurrency: 1
+
+# Kafka Topics Configuration
+kafka:
+  topics:
+    notification: notification-topic
+    create-shared-goal: create-shared-goal-topic
+    goal-created: goal-created-topic
+
+# Logging Configuration
+logging:
+  level:
+    org.goalapp.challenge: DEBUG
+    org.springframework.kafka: INFO
+    org.hibernate.SQL: DEBUG
+    org.hibernate.type.descriptor.sql.BasicBinder: TRACE
+    com.mysql: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+    file: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+  file:
+    name: logs/challenge-service.log
+
+# Management and Monitoring
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+
+# Application Info
+info:
+  app:
+    name: Challenge Service
+    description: Microservice for managing goal challenges between friends
+    version: 1.0.0
+    database: MySQL 8.0
+
+# Service URLs
+services:
+  user-service:
+    url: http://localhost:8081
+  goal-service:
+    url: http://localhost:8082
+  notification-service:
+    url: http://localhost:8084
